@@ -7,7 +7,7 @@ const express = require("express");
 const mongoose = require("mongoose");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
-const { privateDecrypt, generateKeyPairSync } = require("crypto");
+const { privateDecrypt, generateKeyPairSync, randomBytes, createCipheriv, createDecipheriv } = require("crypto");
 const winston = require("winston");
 const User = require("./models/User");
 const Message = require("./models/Message");
@@ -84,6 +84,47 @@ function broadcast(message) {
   }
 }
 
+// --- AES-GCM encryption-at-rest utilities ---
+function getAesKey() {
+  const base64 = process.env.MESSAGE_AES_KEY;
+  if (!base64) {
+    logger.warn("MESSAGE_AES_KEY not set. Generating volatile key (dev only). Messages won't be readable across restarts.");
+    return randomBytes(32);
+  }
+  try {
+    const buf = Buffer.from(base64, "base64");
+    if (buf.length !== 32) throw new Error("Invalid key length");
+    return buf;
+  } catch (e) {
+    logger.error("Failed to parse MESSAGE_AES_KEY. Expect base64-encoded 32 bytes.");
+    process.exit(1);
+  }
+}
+
+const AES_KEY = getAesKey();
+
+function encryptAtRest(plaintext) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", AES_KEY, iv);
+  const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return {
+    iv: iv.toString("base64"),
+    ciphertext: ciphertext.toString("base64"),
+    authTag: authTag.toString("base64")
+  };
+}
+
+function decryptAtRest(ivB64, ctB64, tagB64) {
+  const iv = Buffer.from(ivB64, "base64");
+  const ciphertext = Buffer.from(ctB64, "base64");
+  const authTag = Buffer.from(tagB64, "base64");
+  const decipher = createDecipheriv("aes-256-gcm", AES_KEY, iv);
+  decipher.setAuthTag(authTag);
+  const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
+  return plaintext;
+}
+
 // --- Routes ---
 
 // Expose public key for clients to encrypt messages
@@ -129,6 +170,14 @@ app.post("/login", async (req, res) => {
 
 // SSE endpoint
 app.get("/events", (req, res) => {
+  const token = req.query.token;
+  if (!token) return res.status(401).end();
+  try {
+    jwt.verify(token, process.env.JWT_SECRET);
+  } catch (e) {
+    return res.status(401).end();
+  }
+
   res.set({
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -138,7 +187,12 @@ app.get("/events", (req, res) => {
   clients.add(res);
   logger.info("SSE client connected", { currentClients: clients.size });
 
+  const interval = setInterval(() => {
+    try { res.write(": ping\n\n"); } catch (_) {}
+  }, 25000);
+
   req.on("close", () => {
+    clearInterval(interval);
     clients.delete(res);
     logger.info("SSE client disconnected", { currentClients: clients.size });
   });
@@ -168,9 +222,12 @@ app.post("/send", async (req, res) => {
       return res.status(400).json({ error: "Failed to decrypt message" });
     }
 
+    const sealed = encryptAtRest(decrypted);
     const message = new Message({
       sender: username,
-      content: decrypted
+      iv: sealed.iv,
+      ciphertext: sealed.ciphertext,
+      authTag: sealed.authTag
     });
     await message.save();
 
@@ -190,22 +247,26 @@ app.get("/messages", async (req, res) => {
   try {
     jwt.verify(token, process.env.JWT_SECRET);
     const messages = await Message.find().sort({ timestamp: -1 }).limit(100);
-    res.json(messages);
+    const out = messages.map(m => ({
+      sender: m.sender,
+      content: (() => { try { return decryptAtRest(m.iv, m.ciphertext, m.authTag); } catch (_) { return "<decryption failed>"; } })(),
+      timestamp: m.timestamp
+    }));
+    res.json(out);
   } catch (err) {
     logger.warn("Unauthorized messages request", { error: err });
     res.status(401).json({ error: "Invalid token" });
   }
 });
 
-const pfxPath = process.env.SSL_PFX_PATH || path.join(__dirname, "cert/server.pfx");
-const passphrase = process.env.SSL_PFX_PASS || "1234";
+if (process.env.NODE_ENV !== "test") {
+  const pfxPath = process.env.SSL_PFX_PATH || path.join(__dirname, "cert/server.pfx");
+  const passphrase = process.env.SSL_PFX_PASS || "1234";
+  const sslOptions = { pfx: fs.readFileSync(pfxPath), passphrase };
+  const port = process.env.PORT || 3001;
+  https.createServer(sslOptions, app).listen(port, () => {
+    logger.info(`Secure server listening on https://localhost:${port}`);
+  });
+}
 
-const sslOptions = {
-  pfx: fs.readFileSync(pfxPath),
-  passphrase
-};
-
-const port = process.env.PORT || 3001;
-https.createServer(sslOptions, app).listen(port, () => {
-  logger.info(`Secure server listening on https://localhost:${port}`);
-});
+module.exports = app;

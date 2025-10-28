@@ -14,7 +14,7 @@ export default function Chat({ token }) {
       .then(k => setPublicKey(k))
       .catch(err => console.error("Failed to fetch public key", err));
 
-    const evtSource = new EventSource("https://localhost:3001/events");
+    const evtSource = new EventSource(`https://localhost:3001/events?token=${encodeURIComponent(token)}`);
     evtSource.onmessage = (e) => {
       const data = JSON.parse(e.data);
       setMessages(prev => [...prev, data]);
