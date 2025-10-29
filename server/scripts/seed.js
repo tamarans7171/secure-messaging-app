@@ -5,6 +5,29 @@ const User = require('../models/User');
 const Message = require('../models/Message');
 const { encryptAtRest } = require('../crypto-utils');
 
+// If developer enabled key persistence for demo, ensure a key exists for seeding
+if (!process.env.MESSAGE_AES_KEY && process.env.DEV_PERSIST_MESSAGE_KEY === '1') {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const dataDir = path.join(__dirname, '..', 'data');
+    const keyFile = path.join(dataDir, 'MESSAGE_AES_KEY');
+    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+    if (fs.existsSync(keyFile)) {
+      process.env.MESSAGE_AES_KEY = fs.readFileSync(keyFile, 'utf8').trim();
+      console.log('Loaded persisted MESSAGE_AES_KEY for seeding');
+    } else {
+      const crypto = require('crypto');
+      const newKey = crypto.randomBytes(32).toString('base64');
+      fs.writeFileSync(keyFile, newKey, { encoding: 'utf8', mode: 0o600 });
+      process.env.MESSAGE_AES_KEY = newKey;
+      console.log('Generated and persisted MESSAGE_AES_KEY for seeding');
+    }
+  } catch (err) {
+    console.warn('Failed to persist/load MESSAGE_AES_KEY for seeding:', err && err.message);
+  }
+}
+
 async function seed() {
   const mongo = process.env.MONGO_URL || 'mongodb://localhost:27017/secure-chat';
   await mongoose.connect(mongo, { useNewUrlParser: true, useUnifiedTopology: true });

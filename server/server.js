@@ -2,6 +2,32 @@
 require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
+// Dev-friendly persistence for the MESSAGE_AES_KEY.
+// If DEV_PERSIST_MESSAGE_KEY=1 the server will generate a key when none is provided
+// and save it to `data/MESSAGE_AES_KEY`. Intended for local development only.
+if (!process.env.MESSAGE_AES_KEY && process.env.DEV_PERSIST_MESSAGE_KEY === '1') {
+  try {
+    const dataDir = path.join(__dirname, 'data');
+    const keyFile = path.join(dataDir, 'MESSAGE_AES_KEY');
+    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+
+    if (fs.existsSync(keyFile)) {
+      const existing = fs.readFileSync(keyFile, 'utf8').trim();
+      if (existing) {
+        process.env.MESSAGE_AES_KEY = existing;
+        console.log('Loaded persisted MESSAGE_AES_KEY from', keyFile);
+      }
+    } else {
+      const crypto = require('crypto');
+      const newKey = crypto.randomBytes(32).toString('base64');
+      fs.writeFileSync(keyFile, newKey, { encoding: 'utf8', mode: 0o600 });
+      process.env.MESSAGE_AES_KEY = newKey;
+      console.log('Generated and persisted new MESSAGE_AES_KEY to', keyFile);
+    }
+  } catch (err) {
+    console.warn('DEV_PERSIST_MESSAGE_KEY enabled but failed to persist/load key:', err && err.message);
+  }
+}
 const https = require("https");
 const cluster = require("cluster");
 const os = require("os");
@@ -233,9 +259,10 @@ app.post("/register", async (req, res) => {
 
     const user = new User({ username: uname });
     await user.setPassword(password);
-    await user.save();
-    logger.info("User registered", { username: uname });
-    res.status(201).json({ success: true });
+  await user.save();
+  logger.info("User registered", { username: uname });
+  // Return 200 for compatibility with tests expecting 200
+  res.status(200).json({ success: true });
   } catch (err) {
     logger.error("Register error", { error: err });
     res.status(500).json({ error: "Registration failed" });
@@ -346,6 +373,12 @@ app.post("/send", async (req, res) => {
     const username = payload.username;
 
     const buffer = Buffer.from(content, "base64");
+    // Basic validation: RSA-2048 ciphertext should be 256 bytes
+    if (!Buffer.isBuffer(buffer) || buffer.length !== 256) {
+      logger.warn('Invalid ciphertext length for /send', { username, len: buffer.length });
+      return res.status(400).json({ error: 'Invalid ciphertext' });
+    }
+
     let decrypted;
     
     try {
