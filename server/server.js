@@ -115,6 +115,7 @@ if (process.env.RSA_PRIVATE_KEY_PATH && process.env.RSA_PUBLIC_KEY_PATH) {
 }
 
 // --- SSE Clients Map (per worker) ---
+// Map<clientId, { res, username }>
 const clients = new Map(); // Use Map instead of Set for better management
 let clientIdCounter = 0;
 
@@ -131,9 +132,10 @@ redisSub.on("message", (channel, message) => {
 
 function broadcastToLocalClients(payload) {
   // Send to all clients connected to THIS worker
-  for (const [id, res] of clients.entries()) {
+  for (const [id, info] of clients.entries()) {
+    const res = info && info.res;
     try {
-      res.write(`data: ${payload}\n\n`);
+      if (res && !res.finished) res.write(`data: ${payload}\n\n`);
     } catch (err) {
       logger.error("Error writing to SSE client", { error: err, clientId: id });
       clients.delete(id); // Remove dead connections
@@ -266,14 +268,34 @@ app.post("/login", async (req, res) => {
   }
 });
 // SSE endpoint - OPTIMIZED
-app.get("/events", (req, res) => {
-  const token = req.query.token;
-  if (!token) return res.status(401).end();
-  
+app.get("/events", async (req, res) => {
+  // Support token via query param or Authorization header
+  const tokenFromQuery = req.query && req.query.token;
+  const authHeader = req.headers && req.headers.authorization;
+  let token = tokenFromQuery;
+  if (!token && authHeader && authHeader.startsWith('Bearer ')) {
+    token = authHeader.slice(7).trim();
+  }
+
+  if (!token) return res.status(401).json({ error: 'Missing token' });
+
+  let payload;
   try {
-    jwt.verify(token, process.env.JWT_SECRET);
+    payload = jwt.verify(token, process.env.JWT_SECRET);
   } catch (e) {
-    return res.status(401).end();
+    logger.warn('Invalid token for SSE connect', { error: e && e.message });
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+
+  // Optionally verify the user still exists
+  const username = payload && payload.username;
+  if (!username) return res.status(401).json({ error: 'Invalid token payload' });
+  try {
+    const user = await User.findOne({ username });
+    if (!user) return res.status(401).json({ error: 'User not found' });
+  } catch (err) {
+    logger.error('Error verifying SSE user', { error: err });
+    return res.status(500).json({ error: 'Server error' });
   }
 
   res.set({
@@ -284,16 +306,22 @@ app.get("/events", (req, res) => {
   res.flushHeaders();
 
   const clientId = ++clientIdCounter;
-  clients.set(clientId, res);
-  
-  // Send initial ping
-  res.write(": connected\n\n");
+  clients.set(clientId, { res, username });
 
-  // NO interval per client! Use a single global interval instead
-  // (see global heartbeat below)
+  // Send initial ping and a small welcome message containing the authenticated username
+  res.write(`: connected\n\n`);
+  const welcome = {
+    sender: 'system',
+    content: { mode: 'plaintext', content: `welcome ${username}` },
+    timestamp: new Date()
+  };
+  res.write(`data: ${JSON.stringify(welcome)}\n\n`);
+
+  logger.info('SSE client connected', { clientId, username });
 
   req.on("close", () => {
     clients.delete(clientId);
+    logger.info('SSE client disconnected', { clientId, username });
   });
 });
 
