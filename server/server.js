@@ -374,17 +374,19 @@ app.get("/messages", async (req, res) => {
       .limit(reqLimit)
       .lean(); // ← Use lean() for better performance
     
-    const out = messages.map(m => ({
-      sender: m.sender,
-      content: (() => {
-        try {
-          return decryptAtRest(m.iv, m.ciphertext, m.authTag);
-        } catch (_) {
-          return "<decryption failed>";
-        }
-      })(),
-      timestamp: m.timestamp
-    }));
+    const out = messages.map(m => {
+      try {
+        const plaintext = decryptAtRest(m.iv, m.ciphertext, m.authTag);
+        return { sender: m.sender, content: plaintext, timestamp: m.timestamp };
+      } catch (err) {
+        // Return encrypted blob when server cannot decrypt so client can show a placeholder
+        return {
+          sender: m.sender,
+          content: { encrypted: true, iv: m.iv, ciphertext: m.ciphertext, authTag: m.authTag },
+          timestamp: m.timestamp
+        };
+      }
+    });
     
     res.json(out);
   } catch (err) {

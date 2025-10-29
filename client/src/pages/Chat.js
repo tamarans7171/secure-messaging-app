@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { sendMessage } from "../api";
+import { sendMessage, getMessages } from "../api";
 import JSEncrypt from "jsencrypt";
 
 export default function Chat({ token, groupKey }) {
@@ -8,6 +8,28 @@ export default function Chat({ token, groupKey }) {
   const [publicKey, setPublicKey] = useState(null);
 
   useEffect(() => {
+    (async () => {
+      try {
+        const res = await getMessages(token, { limit: 100 });
+        if (res && res.data && Array.isArray(res.data)) {
+          // server returns newest->oldest; we want to display oldest->newest
+          const list = res.data.slice().reverse();
+          const normalized = await Promise.all(list.map(async (m) => {
+            if (m && m.content && typeof m.content === 'object' && m.content.encrypted) {
+              // try local decrypt if possible
+              const local = await tryLocalDecrypt(m.content).catch(() => null);
+              if (local) return { sender: m.sender, content: local, timestamp: m.timestamp };
+              return { sender: m.sender, content: m.content, timestamp: m.timestamp };
+            }
+            return { sender: m.sender, content: m.content, timestamp: m.timestamp };
+          }));
+          setMessages(normalized);
+        }
+      } catch (err) {
+        console.error("Failed to load message history:", err);
+      }
+    })();
+
     const b64ToBytes = (b64) => {
       const bin = atob(b64);
       const arr = new Uint8Array(bin.length);
@@ -15,19 +37,48 @@ export default function Chat({ token, groupKey }) {
       return arr;
     };
 
+      const tryLocalDecrypt = async (blob) => {
+        // blob: { iv, ciphertext, authTag }
+        if (!groupKey) return null;
+        try {
+          const keyBytes = b64ToBytes(groupKey);
+          const iv = b64ToBytes(blob.iv);
+          const ct = b64ToBytes(blob.ciphertext);
+          const tag = b64ToBytes(blob.authTag);
+
+          const cryptoKey = await window.crypto.subtle.importKey(
+            'raw', keyBytes, { name: 'AES-GCM' }, false, ['decrypt']
+          );
+
+          const combined = new Uint8Array(ct.length + tag.length);
+          combined.set(ct, 0);
+          combined.set(tag, ct.length);
+
+          const decrypted = await window.crypto.subtle.decrypt(
+            { name: 'AES-GCM', iv, tagLength: 128 },
+            cryptoKey,
+            combined
+          );
+
+          return new TextDecoder().decode(new Uint8Array(decrypted));
+        } catch (e) {
+          return null;
+        }
+      };
+
     // Fetch public key
     fetch("https://localhost:3001/public-key")
       .then(r => r.text())
       .then(k => setPublicKey(k))
       .catch(err => console.error("Failed to fetch public key", err));
 
-    const evtSource = new EventSource(`https://localhost:3001/events?token=${encodeURIComponent(token)}`);
+  const evtSource = new EventSource(`https://localhost:3001/events?token=${encodeURIComponent(token)}`);
 
     evtSource.onmessage = async (e) => {
       const payload = JSON.parse(e.data);
 
       // Case 1: Encrypted message with key available
-      if (payload.content.mode === "aes-gcm" && groupKey) {
+  if (payload.content.mode === "aes-gcm" && groupKey) {
         try {
           const keyBytes = b64ToBytes(groupKey);
           const iv = b64ToBytes(payload.content.iv);
@@ -129,7 +180,14 @@ export default function Chat({ token, groupKey }) {
         ) : (
           messages.map((m, i) => (
             <div key={i} style={{ marginBottom: "8px" }}>
-              <b>{m.sender}</b>: {m.content}
+              <b>{m.sender}</b>: {
+                typeof m.content === 'string' ? m.content : (
+                  m.content && m.content.encrypted ? (
+                    // Try to decrypt locally if possible, otherwise show placeholder
+                    (groupKey ? '<encrypted - attempting local decrypt>' : '<encrypted - server cannot decrypt>')
+                  ) : '<unknown format>'
+                )
+              }
             </div>
           ))
         )}

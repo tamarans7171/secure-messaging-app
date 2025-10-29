@@ -11,5 +11,10 @@ export const login = (username, password) =>
 export const sendMessage = (token, content) =>
   axios.post(`${API_URL}/send`, { token, content });
 
-export const getMessages = (token) =>
-  axios.get(`${API_URL}/messages`, { headers: { Authorization: `Bearer ${token}` } });
+export const getMessages = (token, opts = {}) => {
+  const headers = { Authorization: `Bearer ${token}` };
+  const params = {};
+  if (opts.limit) params.limit = opts.limit;
+  if (opts.before) params.before = opts.before;
+  return axios.get(`${API_URL}/messages`, { headers, params });
+};
