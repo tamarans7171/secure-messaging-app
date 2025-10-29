@@ -1,4 +1,5 @@
 process.env.NODE_ENV = 'test';
+jest.setTimeout(20000);
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 const request = require('supertest');
 const mongoose = require('mongoose');

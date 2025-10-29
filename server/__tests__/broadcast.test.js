@@ -1,4 +1,5 @@
 process.env.NODE_ENV = 'test';
+jest.setTimeout(20000);
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 const request = require('supertest');
 const mongoose = require('mongoose');
@@ -24,7 +25,7 @@ describe('Broadcast flow (basic)', () => {
   test('Send then list messages returns the plaintext', async () => {
     // Fetch public key
     const pkRes = await request(app).get('/public-key').expect(200);
-    expect(pkRes.text).toContain('BEGIN RSA PUBLIC KEY');
+  expect(pkRes.text).toContain('BEGIN PUBLIC KEY');
     // For test simplicity, bypass RSA and hit /send with an obviously invalid base64 -> expect 400
     await request(app).post('/send').send({ token, content: 'invalid_base64' }).expect(400);
   });

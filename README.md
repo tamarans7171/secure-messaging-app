@@ -104,6 +104,7 @@ npm start
 - Public/private key mechanism: Server exposes RSA public key; client encrypts message payloads using RSA before sending; server decrypts with private key.
 - Broadcasting without WebSockets: Implemented using SSE (`/events`); all connected clients receive broadcast messages.
 - Message storage: Messages are persisted in MongoDB. Note: current model stores plaintext (see Security section for at-rest encryption recommendation).
+ - Message storage: Messages are persisted in MongoDB and the server stores messages encrypted-at-rest using AES-256-GCM. The server will encrypt messages before saving and decrypt for authorized reads. If `MESSAGE_AES_KEY` is not provided the server will use a volatile key for the running process (not suitable for multi-process persistence across restarts).
 - Logging: Winston logs significant events (registration, login, message send, SSE connects/disconnects).
 - Query API: Authenticated endpoint to fetch recent messages.
 
@@ -126,7 +127,7 @@ Base URL: `https://localhost:3001`
 
 - GET `/events` (SSE stream)
   - Stream of broadcast messages in the form `{ sender, content, timestamp }`.
-  - Note: Current implementation does not require auth on the SSE stream (see Security section for recommended hardening).
+  - Note: The SSE endpoint requires a `token` query parameter and the server verifies the JWT before accepting the stream. Keep your JWT safe and avoid exposing it in public places.
 
 - POST `/send`
   - Body: `{ "token": string, "content": string }`
@@ -163,7 +164,8 @@ Base URL: `https://localhost:3001`
   - SSE and all HTTP endpoints are over TLS.
 
 - Encryption at Rest (Recommendation):
-  - The current `Message` model stores plaintext content. For the exercise requirement “encrypted at rest,” implement AES-256-GCM using a server-held key (e.g., `MESSAGE_AES_KEY`), storing `iv`, `ciphertext`, and `authTag` per message, and decrypting for authorized reads.
+ - Encryption at Rest:
+  - The server encrypts messages at rest using AES-256-GCM and stores `iv`, `ciphertext`, and `authTag` per message. The encryption key is read from the environment variable `MESSAGE_AES_KEY` (base64-encoded 32 bytes). If not set, the server will generate a volatile key on startup — this preserves encryption within a single process but is not suitable for persistent multi-process deployments. For production use set `MESSAGE_AES_KEY` to a secure base64-encoded 32-byte value.
 
 - Hybrid Crypto (Recommendation):
   - RSA is not suitable for large payloads. Prefer hybrid encryption: encrypt the message with AES-GCM, then wrap the AES key with RSA (OAEP preferred), enabling longer messages and modern security.
@@ -173,6 +175,19 @@ Base URL: `https://localhost:3001`
 
 - Logging:
   - Winston writes to console and rotating files in `server/logs/`.
+
+---
+
+## Required / Optional Environment Variables (summary)
+
+- MONGO_URL (required for DB connectivity)
+- JWT_SECRET (required for signing tokens)
+- REDIS_URL (optional, default redis://localhost:6379) — required for cross-worker broadcast when clustering
+- MESSAGE_AES_KEY (optional but strongly recommended) — base64-encoded 32 bytes for AES-256-GCM at-rest encryption
+- GROUP_AES_KEY (optional) — base64-encoded 32 bytes used to encrypt broadcast payloads for clients that share a group key
+- RSA_PRIVATE_KEY_PATH / RSA_PUBLIC_KEY_PATH (optional) — paths to PEM files; if omitted server generates ephemeral RSA keypair
+- SSL_PFX_PATH / SSL_PFX_PASS (required for HTTPS in this repo's default mode)
+
 
 ---
 

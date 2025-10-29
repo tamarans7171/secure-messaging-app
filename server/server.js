@@ -10,7 +10,8 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const Redis = require("ioredis");
-const { privateDecrypt, generateKeyPairSync, randomBytes, createCipheriv, createDecipheriv } = require("crypto");
+const { privateDecrypt, generateKeyPairSync, randomBytes, createCipheriv, createDecipheriv, publicEncrypt } = require("crypto");
+const { encryptAtRest, decryptAtRest } = require("./crypto-utils");
 const winston = require("winston");
 const User = require("./models/User");
 const Message = require("./models/Message");
@@ -20,7 +21,7 @@ const Message = require("./models/Message");
 // ========================================
 const numCPUs = os.cpus().length;
 
-if (cluster.isMaster && process.env.NODE_ENV !== "test") {
+if (cluster.isMaster && require.main === module && process.env.NODE_ENV !== "test") {
   console.log(`Master ${process.pid} is running`);
   console.log(`Forking ${numCPUs} workers...`);
 
@@ -32,7 +33,10 @@ if (cluster.isMaster && process.env.NODE_ENV !== "test") {
     console.log(`Worker ${worker.process.pid} died. Restarting...`);
     cluster.fork();
   });
-  return;
+  // Exit the master process after forking workers so the master does not
+  // continue to execute worker-only code. `return` is invalid at top-level
+  // in CommonJS modules, so use process.exit instead.
+  process.exit(0);
 }
 
 // ========================================
@@ -89,7 +93,7 @@ redis.on("error", (err) => logger.error("Redis error", { error: err.message }));
 // --- RSA Key Management ---
 let privateKeyPem, publicKeyPem;
 
-if (process.env.RSA_PRIVATE_KEY_PATH && process.env.RSA_PUBLIC_KEY_PATH) {
+  if (process.env.RSA_PRIVATE_KEY_PATH && process.env.RSA_PUBLIC_KEY_PATH) {
   try {
     privateKeyPem = fs.readFileSync(process.env.RSA_PRIVATE_KEY_PATH, "utf8");
     publicKeyPem = fs.readFileSync(process.env.RSA_PUBLIC_KEY_PATH, "utf8");
@@ -98,8 +102,8 @@ if (process.env.RSA_PRIVATE_KEY_PATH && process.env.RSA_PUBLIC_KEY_PATH) {
     logger.warn("RSA key files not found, generating ephemeral keys");
     const { publicKey, privateKey } = generateKeyPairSync("rsa", {
       modulusLength: 2048,
-      publicKeyEncoding: { type: "pkcs1", format: "pem" },
-      privateKeyEncoding: { type: "pkcs1", format: "pem" }
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" }
     });
     publicKeyPem = publicKey;
     privateKeyPem = privateKey;
@@ -107,8 +111,8 @@ if (process.env.RSA_PRIVATE_KEY_PATH && process.env.RSA_PUBLIC_KEY_PATH) {
 } else {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", {
     modulusLength: 2048,
-    publicKeyEncoding: { type: "pkcs1", format: "pem" },
-    privateKeyEncoding: { type: "pkcs1", format: "pem" }
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" }
   });
   publicKeyPem = publicKey;
   privateKeyPem = privateKey;
@@ -245,7 +249,21 @@ app.post("/login", async (req, res) => {
     }
     const token = jwt.sign({ username }, process.env.JWT_SECRET, { expiresIn: "1h" });
     logger.info("User logged in", { username });
-    res.json({ token, groupKey: process.env.GROUP_AES_KEY || "" });
+    // Do NOT return raw group key (server secret). If the client provided a public key
+    // in the login request we will wrap the group key with it and return the wrapped value.
+    const clientPub = req.body.clientPublicKey;
+    if (clientPub && process.env.GROUP_AES_KEY) {
+      try {
+        // Encrypt the group key with client's public key using OAEP if possible
+        const wrapped = publicEncrypt({ key: clientPub, padding: require('crypto').constants.RSA_PKCS1_OAEP_PADDING }, Buffer.from(process.env.GROUP_AES_KEY, 'base64'));
+        return res.json({ token, wrappedGroupKey: wrapped.toString('base64') });
+      } catch (err) {
+        // fallback: do not return the raw key
+        logger.warn('Failed to wrap group key for client', { error: err.message });
+        return res.json({ token });
+      }
+    }
+    res.json({ token });
   } catch (err) {
     logger.error("Login error", { error: err });
     res.status(500).json({ error: "Login failed" });

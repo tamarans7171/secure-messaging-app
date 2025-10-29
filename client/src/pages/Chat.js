@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from "react";
 import { sendMessage } from "../api";
-import JSEncrypt from "jsencrypt";
 
 export default function Chat({ token, groupKey }) {
   const [messages, setMessages] = useState([]);
@@ -15,7 +14,7 @@ export default function Chat({ token, groupKey }) {
       return arr;
     };
 
-    // Fetch public key
+    // Fetch server public key (SPKI PEM)
     fetch("https://localhost:3001/public-key")
       .then(r => r.text())
       .then(k => setPublicKey(k))
@@ -105,14 +104,36 @@ export default function Chat({ token, groupKey }) {
     if (!text.trim()) return;
     if (!publicKey) return alert("Public key not loaded yet");
 
-    const encrypt = new JSEncrypt();
-    encrypt.setPublicKey(publicKey);
-    const encrypted = encrypt.encrypt(text);
-
-    if (!encrypted) return alert("Encryption failed");
-
     try {
-      await sendMessage(token, encrypted);
+      // Import server public key (PEM -> ArrayBuffer -> CryptoKey)
+      const pem = publicKey.replace(/-----BEGIN PUBLIC KEY-----|-----END PUBLIC KEY-----|\n/g, '');
+      const binaryDer = Uint8Array.from(atob(pem), c => c.charCodeAt(0)).buffer;
+      const serverPubKey = await window.crypto.subtle.importKey(
+        'spki',
+        binaryDer,
+        { name: 'RSA-OAEP', hash: 'SHA-256' },
+        false,
+        ['encrypt']
+      );
+
+      // Generate ephemeral AES-GCM key
+      const aesKey = await window.crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+      const iv = window.crypto.getRandomValues(new Uint8Array(12));
+      const encoded = new TextEncoder().encode(text);
+      const ctBuffer = await window.crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, encoded);
+
+      // Export raw AES key and encrypt it with server public key
+      const rawKey = await window.crypto.subtle.exportKey('raw', aesKey);
+      const wrappedKey = await window.crypto.subtle.encrypt({ name: 'RSA-OAEP' }, serverPubKey, rawKey);
+
+      const toSend = {
+        mode: 'hybrid',
+        key: btoa(String.fromCharCode(...new Uint8Array(wrappedKey))),
+        iv: btoa(String.fromCharCode(...iv)),
+        ciphertext: btoa(String.fromCharCode(...new Uint8Array(ctBuffer)))
+      };
+
+      await sendMessage(token, toSend);
       setText("");
     } catch (err) {
       console.error("Send failed:", err);
