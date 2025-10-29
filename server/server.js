@@ -32,8 +32,7 @@ if (cluster.isMaster && process.env.NODE_ENV !== "test") {
     console.log(`Worker ${worker.process.pid} died. Restarting...`);
     cluster.fork();
   });
-  return;
-}
+} else {
 
 // ========================================
 // WORKER PROCESS
@@ -221,14 +220,20 @@ app.get("/public-key", (req, res) => {
 app.post("/register", async (req, res) => {
   try {
     const { username, password } = req.body;
-    if (!username || !password || password.length < 6) {
-      return res.status(400).json({ error: "Invalid username/password" });
-    }
-    const user = new User({ username });
+    if (!username || !password) return res.status(400).json({ error: "Missing username or password" });
+    const uname = String(username).trim().toLowerCase();
+    if (!/^[a-z0-9_.-]{3,30}$/.test(uname)) return res.status(400).json({ error: "Invalid username format" });
+    if (typeof password !== 'string' || password.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
+
+    // Prevent duplicate users
+    const existing = await User.findOne({ username: uname });
+    if (existing) return res.status(409).json({ error: "Username already taken" });
+
+    const user = new User({ username: uname });
     await user.setPassword(password);
     await user.save();
-    logger.info("User registered", { username });
-    res.json({ success: true });
+    logger.info("User registered", { username: uname });
+    res.status(201).json({ success: true });
   } catch (err) {
     logger.error("Register error", { error: err });
     res.status(500).json({ error: "Registration failed" });
@@ -238,20 +243,28 @@ app.post("/register", async (req, res) => {
 app.post("/login", async (req, res) => {
   try {
     const { username, password } = req.body;
-    const user = await User.findOne({ username });
+    if (!username || !password) return res.status(400).json({ error: "Missing username or password" });
+    const uname = String(username).trim().toLowerCase();
+
+    const user = await User.findOne({ username: uname });
     if (!user || !(await user.validatePassword(password))) {
-      logger.info("Failed login attempt", { username });
+      logger.info("Failed login attempt", { username: uname });
       return res.status(401).json({ error: "Invalid credentials" });
     }
-    const token = jwt.sign({ username }, process.env.JWT_SECRET, { expiresIn: "1h" });
-    logger.info("User logged in", { username });
-    res.json({ token, groupKey: process.env.GROUP_AES_KEY || "" });
+
+    if (!process.env.JWT_SECRET) {
+      logger.error('JWT_SECRET is not set');
+      return res.status(500).json({ error: 'Server misconfiguration' });
+    }
+
+    const token = jwt.sign({ username: uname }, process.env.JWT_SECRET, { expiresIn: "1h", algorithm: 'HS256' });
+    logger.info("User logged in", { username: uname });
+    res.json({ token });
   } catch (err) {
     logger.error("Login error", { error: err });
     res.status(500).json({ error: "Login failed" });
   }
 });
-
 // SSE endpoint - OPTIMIZED
 app.get("/events", (req, res) => {
   const token = req.query.token;
@@ -317,6 +330,15 @@ app.post("/send", async (req, res) => {
       return res.status(400).json({ error: "Failed to decrypt message" });
     }
 
+    // Enforce reasonable message length limits to avoid abuse
+    const MAX_MESSAGE_CHARS = parseInt(process.env.MAX_MESSAGE_CHARS || '2000', 10);
+    if (typeof decrypted !== 'string' || decrypted.length === 0) {
+      return res.status(400).json({ error: 'Empty message' });
+    }
+    if (decrypted.length > MAX_MESSAGE_CHARS) {
+      return res.status(413).json({ error: 'Message too large' });
+    }
+
     const sealed = encryptAtRest(decrypted);
     const message = new Message({
       sender: username,
@@ -343,9 +365,13 @@ app.get("/messages", async (req, res) => {
   const token = auth.split(" ")[1];
   try {
     jwt.verify(token, process.env.JWT_SECRET);
-    const messages = await Message.find()
+    // Support pagination: ?limit=50 (max 200), ?before=<ISO timestamp>
+    const reqLimit = Math.min(parseInt(req.query.limit || '100', 10) || 100, 200);
+    const before = req.query.before ? new Date(req.query.before) : null;
+    const q = before ? { timestamp: { $lt: before } } : {};
+    const messages = await Message.find(q)
       .sort({ timestamp: -1 })
-      .limit(100)
+      .limit(reqLimit)
       .lean(); // ← Use lean() for better performance
     
     const out = messages.map(m => ({
@@ -390,5 +416,6 @@ if (process.env.NODE_ENV !== "test") {
     logger.info(`Worker ${process.pid} listening on https://localhost:${port}`);
   });
 }
-
 module.exports = app;
+
+} // end master/worker conditional

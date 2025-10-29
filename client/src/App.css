@@ -28,6 +28,42 @@
   color: #61dafb;
 }
 
+/* Auth form styling */
+.auth-container {
+  max-width: 420px;
+  margin: 24px auto;
+  background: #fff;
+  padding: 18px;
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+  color: #222;
+}
+.auth-form input {
+  width: 95%;
+  padding: 10px 12px;
+  margin: 8px 0;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 14px;
+}
+.auth-form button {
+  padding: 10px 14px;
+  background: #1976d2;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.auth-form button:disabled { opacity: 0.6; cursor: default; }
+.msg { margin-top: 12px; padding: 8px 10px; border-radius: 6px; font-size: 14px; }
+.msg.error { background: #ffecec; color: #b00020; border: 1px solid #f5c6cb }
+.msg.success { background: #e9f7ef; color: #1e7a2e; border: 1px solid #c3e6cb }
+.msg.info { background: #eef6ff; color: #0b63b6; border: 1px solid #cfe2ff }
+
+/* Chat area small polish */
+.chat-container { max-width: 760px; margin: 18px auto; }
+.chat-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; }
+
 @keyframes App-logo-spin {
   from {
     transform: rotate(0deg);

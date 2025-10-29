@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import Register from "./pages/Register";
 import Login from "./pages/Login";
 import Chat from "./pages/Chat";
+import "./App.css";
 
 function App() {
   const [token, setToken] = useState(null);
