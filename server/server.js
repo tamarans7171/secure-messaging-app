@@ -1,33 +1,7 @@
-// server.js - Optimized for 10,000+ concurrent connections
+// Lightweight secure messaging server
 require("dotenv").config();
 const fs = require("fs");
 const path = require("path");
-// Dev-friendly persistence for the MESSAGE_AES_KEY.
-// If DEV_PERSIST_MESSAGE_KEY=1 the server will generate a key when none is provided
-// and save it to `data/MESSAGE_AES_KEY`. Intended for local development only.
-if (!process.env.MESSAGE_AES_KEY && process.env.DEV_PERSIST_MESSAGE_KEY === '1') {
-  try {
-    const dataDir = path.join(__dirname, 'data');
-    const keyFile = path.join(dataDir, 'MESSAGE_AES_KEY');
-    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-
-    if (fs.existsSync(keyFile)) {
-      const existing = fs.readFileSync(keyFile, 'utf8').trim();
-      if (existing) {
-        process.env.MESSAGE_AES_KEY = existing;
-        console.log('Loaded persisted MESSAGE_AES_KEY from', keyFile);
-      }
-    } else {
-      const crypto = require('crypto');
-      const newKey = crypto.randomBytes(32).toString('base64');
-      fs.writeFileSync(keyFile, newKey, { encoding: 'utf8', mode: 0o600 });
-      process.env.MESSAGE_AES_KEY = newKey;
-      console.log('Generated and persisted new MESSAGE_AES_KEY to', keyFile);
-    }
-  } catch (err) {
-    console.warn('DEV_PERSIST_MESSAGE_KEY enabled but failed to persist/load key:', err && err.message);
-  }
-}
 const https = require("https");
 const cluster = require("cluster");
 const os = require("os");
@@ -36,40 +10,29 @@ const mongoose = require("mongoose");
 const cors = require("cors");
 const jwt = require("jsonwebtoken");
 const Redis = require("ioredis");
-const { privateDecrypt, generateKeyPairSync, randomBytes, createCipheriv, createDecipheriv } = require("crypto");
+const { privateDecrypt, generateKeyPairSync, randomBytes, createCipheriv } = require("crypto");
 const winston = require("winston");
 const User = require("./models/User");
 const Message = require("./models/Message");
+const { encryptAtRest, decryptAtRest } = require('./crypto-utils');
 
-// ========================================
-// CLUSTER MODE - Multi-process for scalability
-// ========================================
 const numCPUs = os.cpus().length;
 
 if (cluster.isMaster && process.env.NODE_ENV !== "test") {
   console.log(`Master ${process.pid} is running`);
-  console.log(`Forking ${numCPUs} workers...`);
-
-  for (let i = 0; i < numCPUs; i++) {
-    cluster.fork();
-  }
-
-  cluster.on("exit", (worker, code, signal) => {
+  for (let i = 0; i < numCPUs; i++) cluster.fork();
+  cluster.on("exit", (worker) => {
     console.log(`Worker ${worker.process.pid} died. Restarting...`);
     cluster.fork();
   });
 } else {
-
-// ========================================
-// WORKER PROCESS
-// ========================================
-console.log(`Worker ${process.pid} started`);
+  console.log(`Worker ${process.pid} started`);
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- Optimized Logging (async, buffered) ---
+// Logging
 const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || "warn", // Only warnings/errors in production
   format: winston.format.combine(
@@ -90,7 +53,7 @@ const logger = winston.createLogger({
   ]
 });
 
-// --- MongoDB with Connection Pooling ---
+// MongoDB connection
 mongoose.connect(process.env.MONGO_URL, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
@@ -105,13 +68,13 @@ mongoose.connect(process.env.MONGO_URL, {
     process.exit(1);
   });
 
-// --- Redis for Pub/Sub (broadcast across workers) ---
+// Redis pub/sub for cross-worker broadcasting
 const redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
 const redisSub = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
 
 redis.on("error", (err) => logger.error("Redis error", { error: err.message }));
 
-// --- RSA Key Management ---
+// RSA key management (load from files or generate ephemeral pair)
 let privateKeyPem, publicKeyPem;
 
 if (process.env.RSA_PRIVATE_KEY_PATH && process.env.RSA_PUBLIC_KEY_PATH) {
@@ -140,9 +103,8 @@ if (process.env.RSA_PRIVATE_KEY_PATH && process.env.RSA_PUBLIC_KEY_PATH) {
   logger.warn("Generated ephemeral RSA keypair on startup");
 }
 
-// --- SSE Clients Map (per worker) ---
-// Map<clientId, { res, username }>
-const clients = new Map(); // Use Map instead of Set for better management
+// SSE clients map: Map<id, {res, username}>
+const clients = new Map();
 let clientIdCounter = 0;
 
 // Subscribe to Redis channel for cross-worker broadcasting
@@ -157,60 +119,25 @@ redisSub.on("message", (channel, message) => {
 });
 
 function broadcastToLocalClients(payload) {
-  // Send to all clients connected to THIS worker
   for (const [id, info] of clients.entries()) {
     const res = info && info.res;
     try {
       if (res && !res.finished) res.write(`data: ${payload}\n\n`);
     } catch (err) {
       logger.error("Error writing to SSE client", { error: err, clientId: id });
-      clients.delete(id); // Remove dead connections
+      clients.delete(id);
     }
   }
 }
 
 function broadcast(message) {
   const payload = JSON.stringify(message);
-  // Publish to Redis - all workers will receive it
   redis.publish("chat:broadcast", payload, (err) => {
     if (err) logger.error("Redis publish error", { error: err });
   });
 }
 
-// --- AES Encryption Functions ---
-function getAesKey() {
-  const base64 = process.env.MESSAGE_AES_KEY;
-  if (!base64) {
-    logger.warn("MESSAGE_AES_KEY not set. Using volatile key.");
-    return randomBytes(32);
-  }
-  const buf = Buffer.from(base64, "base64");
-  if (buf.length !== 32) throw new Error("Invalid MESSAGE_AES_KEY length");
-  return buf;
-}
-
-const AES_KEY = getAesKey();
-
-function encryptAtRest(plaintext) {
-  const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", AES_KEY, iv);
-  const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  return {
-    iv: iv.toString("base64"),
-    ciphertext: ciphertext.toString("base64"),
-    authTag: authTag.toString("base64")
-  };
-}
-
-function decryptAtRest(ivB64, ctB64, tagB64) {
-  const iv = Buffer.from(ivB64, "base64");
-  const ciphertext = Buffer.from(ctB64, "base64");
-  const authTag = Buffer.from(tagB64, "base64");
-  const decipher = createDecipheriv("aes-256-gcm", AES_KEY, iv);
-  decipher.setAuthTag(authTag);
-  return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
-}
+// Encryption at rest helpers are provided by ./crypto-utils
 
 function getGroupKey() {
   const base64 = process.env.GROUP_AES_KEY;

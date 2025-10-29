@@ -30,22 +30,33 @@ secure-messaging-app/
 
 ---
 
-## Environment Variables
+## Environment variables
 
-Create `server/.env` with:
+Create `server/.env` (or set env vars in your environment). Important variables used by the project:
+
+- `MONGO_URL` — MongoDB connection string (required for server and tests).
+- `REDIS_URL` — Redis connection for cross-worker pub/sub (optional for single-process runs).
+- `JWT_SECRET` — Secret used to sign JWTs (required).
+- `MESSAGE_AES_KEY` — Base64-encoded 32-byte AES key used to encrypt messages at rest. If not provided, you can enable `DEV_PERSIST_MESSAGE_KEY=1` to generate and persist a key for local development (see note below).
+- `DEV_PERSIST_MESSAGE_KEY` — When `1`, server will create `server/data/MESSAGE_AES_KEY` containing a generated base64 key (development convenience only).
+- `GROUP_AES_KEY` — Optional base64 32-byte AES key shared with clients to allow client-side decryption of broadcasts/history.
+- `SSL_PFX_PATH` / `SSL_PFX_PASS` — Path and passphrase for HTTPS PFX bundle (development cert at `server/cert/server.pfx` is provided).
+- `RSA_PRIVATE_KEY_PATH` / `RSA_PUBLIC_KEY_PATH` — Optional RSA key file paths. If omitted the server generates an ephemeral RSA pair on startup.
+- `PORT` — Server port (default: 3001).
+
+Example minimal `server/.env` for local development:
 
 ```
-MONGO_URL=mongodb://localhost:27017/secure_messaging
-JWT_SECRET=replace-with-a-long-random-secret
-
-# HTTPS (PFX bundle)
-SSL_PFX_PATH=./cert/server.pfx
+MONGO_URL=mongodb://localhost:27017/secure-chat
+REDIS_URL=redis://localhost:6379
+JWT_SECRET=change_me_for_demo
+DEV_PERSIST_MESSAGE_KEY=1
+SSL_PFX_PATH=server/cert/server.pfx
 SSL_PFX_PASS=1234
-
-# Optional RSA keys (if not provided, the server generates ephemeral keys on startup)
-# RSA_PRIVATE_KEY_PATH=./cert/private.pem
-# RSA_PUBLIC_KEY_PATH=./cert/public.pem
+PORT=3001
 ```
+
+Note: `DEV_PERSIST_MESSAGE_KEY` is a development-only convenience that persists a generated `MESSAGE_AES_KEY` to `server/data/`. Do NOT use this method for production key management; use a secret manager instead.
 
 ---
 
@@ -97,15 +108,15 @@ npm start
 
 ---
 
-## Features Mapped to Requirements
+## Features implemented
 
-- Authentication: Username/password with bcrypt hashing, JWT for session tokens.
-- Encrypted transport: All API and SSE endpoints run over HTTPS/TLS.
-- Public/private key mechanism: Server exposes RSA public key; client encrypts message payloads using RSA before sending; server decrypts with private key.
-- Broadcasting without WebSockets: Implemented using SSE (`/events`); all connected clients receive broadcast messages.
-- Message storage: Messages are persisted in MongoDB. Note: current model stores plaintext (see Security section for at-rest encryption recommendation).
+- Authentication: Username/password with bcrypt hashing; JWT for authorization.
+- Transport encryption: TLS for all HTTP and SSE endpoints (development certificate included).
+- Client→server envelope: client encrypts messages with server RSA public key; server decrypts with private key.
+- Broadcasting without WebSockets: SSE (`/events`) plus Redis pub/sub for multi-worker broadcasts.
+- Encryption at rest: messages are stored encrypted using AES-256-GCM (`MESSAGE_AES_KEY`) — the server encrypts on write and attempts to decrypt on read; when server cannot decrypt it returns the encrypted blob so clients holding the group key may decrypt locally.
 - Logging: Winston logs significant events (registration, login, message send, SSE connects/disconnects).
-- Query API: Authenticated endpoint to fetch recent messages.
+- Query API: Authenticated GET `/messages` supports pagination and returns decrypted plaintext when the server can decrypt, else an encrypted blob.
 
 ---
 
@@ -124,9 +135,8 @@ Base URL: `https://localhost:3001`
   - Body: `{ "username": string, "password": string }`
   - Returns: `{ "token": string }` (JWT, 1h expiry).
 
-- GET `/events` (SSE stream)
-  - Stream of broadcast messages in the form `{ sender, content, timestamp }`.
-  - Note: Current implementation does not require auth on the SSE stream (see Security section for recommended hardening).
+ - GET `/events` (SSE stream)
+  - Authenticated SSE stream for broadcasts (supports `?token=` or `Authorization: Bearer <token>`). Returns messages as `{ sender, content, timestamp }` where `content` is either plaintext or an object `{ mode: 'aes-gcm' | 'plaintext', ... }`.
 
 - POST `/send`
   - Body: `{ "token": string, "content": string }`
@@ -149,7 +159,7 @@ Base URL: `https://localhost:3001`
 
 ---
 
-## Security & Design Choices
+## Security & design choices
 
 - Transport Security (TLS):
   - The server runs exclusively over HTTPS using a PFX bundle.
@@ -162,14 +172,15 @@ Base URL: `https://localhost:3001`
   - Client encrypts message content with server RSA public key (currently PKCS#1 v1.5 via JSEncrypt), server decrypts with private key.
   - SSE and all HTTP endpoints are over TLS.
 
-- Encryption at Rest (Recommendation):
-  - The current `Message` model stores plaintext content. For the exercise requirement “encrypted at rest,” implement AES-256-GCM using a server-held key (e.g., `MESSAGE_AES_KEY`), storing `iv`, `ciphertext`, and `authTag` per message, and decrypting for authorized reads.
 
-  Note about development/homework use:
-  - For the purposes of a take-home assignment or local development it's acceptable to use a temporary key or use the provided convenience `DEV_PERSIST_MESSAGE_KEY` behavior so you can demonstrate encryption-at-rest across restarts. This is intended only for development and testing. Do NOT use a persisted or temporary key like this in production; instead, store `MESSAGE_AES_KEY` in a proper secrets manager and follow secure key-rotation practices.
+- Encryption at rest:
+  - Messages are encrypted using AES-256-GCM before being stored. The server uses `MESSAGE_AES_KEY` (base64 32-bytes) to encrypt/decrypt messages. If the server cannot decrypt a stored message (missing or rotated key), it returns an encrypted blob so clients that possess the group key can decrypt locally.
 
-- Hybrid Crypto (Recommendation):
-  - RSA is not suitable for large payloads. Prefer hybrid encryption: encrypt the message with AES-GCM, then wrap the AES key with RSA (OAEP preferred), enabling longer messages and modern security.
+  Development note:
+  - For the demo you may enable `DEV_PERSIST_MESSAGE_KEY=1` so the server generates and persists a key in `server/data/`. This is only for local testing and demonstration.
+
+- Hybrid crypto:
+  - The server accepts RSA-encrypted envelopes; for production prefer hybrid encryption (AES-GCM for message body + RSA-OAEP to wrap the AES key).
 
 - SSE vs WebSockets:
   - SSE is used to satisfy the “no WebSockets” constraint and supports one-way server->client streams efficiently.
