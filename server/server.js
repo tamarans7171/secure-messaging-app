@@ -125,6 +125,33 @@ function decryptAtRest(ivB64, ctB64, tagB64) {
   return plaintext;
 }
 
+// Broadcast encryption (group key)
+function getGroupKey() {
+  const base64 = process.env.GROUP_AES_KEY;
+  if (!base64) return null;
+  try {
+    const buf = Buffer.from(base64, "base64");
+    if (buf.length !== 32) return null;
+    return buf;
+  } catch (_) { return null; }
+}
+
+const GROUP_KEY = getGroupKey();
+
+function encryptForBroadcast(plaintext) {
+  if (!GROUP_KEY) return { mode: "plaintext", content: plaintext };
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", GROUP_KEY, iv);
+  const ct = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return {
+    mode: "aes-gcm",
+    iv: iv.toString("base64"),
+    ciphertext: ct.toString("base64"),
+    authTag: tag.toString("base64")
+  };
+}
+
 // --- Routes ---
 
 // Expose public key for clients to encrypt messages
@@ -161,7 +188,8 @@ app.post("/login", async (req, res) => {
     }
     const token = jwt.sign({ username }, process.env.JWT_SECRET, { expiresIn: "1h" });
     logger.info("User logged in", { username });
-    res.json({ token });
+    const groupKeyB64 = process.env.GROUP_AES_KEY || "";
+    res.json({ token, groupKey: groupKeyB64 });
   } catch (err) {
     logger.error("Login error", { error: err });
     res.status(500).json({ error: "Login failed" });
@@ -231,7 +259,8 @@ app.post("/send", async (req, res) => {
     });
     await message.save();
 
-    broadcast({ sender: username, content: decrypted, timestamp: message.timestamp });
+    const enc = encryptForBroadcast(decrypted);
+    broadcast({ sender: username, content: enc, timestamp: message.timestamp });
     res.json({ success: true });
   } catch (err) {
     logger.error("Send message error", { error: err });

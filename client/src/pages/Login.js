@@ -10,7 +10,7 @@ export default function Login({ onLogin }) {
     e.preventDefault();
     try {
       const res = await login(username, password);
-      onLogin(res.data.token); // pass token to parent
+      onLogin({ token: res.data.token, groupKey: res.data.groupKey });
     } catch (err) {
       setMsg("Login failed.");
     }

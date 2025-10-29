@@ -5,17 +5,18 @@ import Chat from "./pages/Chat";
 
 function App() {
   const [token, setToken] = useState(null);
+  const [groupKey, setGroupKey] = useState(null);
 
   if (!token) {
     return (
       <div>
         <Register />
-        <Login onLogin={setToken} />
+        <Login onLogin={({ token, groupKey }) => { setToken(token); setGroupKey(groupKey || null); }} />
       </div>
     );
   }
 
-  return <Chat token={token} />;
+  return <Chat token={token} groupKey={groupKey} />;
 }
 
 export default App;
