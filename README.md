@@ -165,6 +165,9 @@ Base URL: `https://localhost:3001`
 - Encryption at Rest (Recommendation):
   - The current `Message` model stores plaintext content. For the exercise requirement “encrypted at rest,” implement AES-256-GCM using a server-held key (e.g., `MESSAGE_AES_KEY`), storing `iv`, `ciphertext`, and `authTag` per message, and decrypting for authorized reads.
 
+  Note about development/homework use:
+  - For the purposes of a take-home assignment or local development it's acceptable to use a temporary key or use the provided convenience `DEV_PERSIST_MESSAGE_KEY` behavior so you can demonstrate encryption-at-rest across restarts. This is intended only for development and testing. Do NOT use a persisted or temporary key like this in production; instead, store `MESSAGE_AES_KEY` in a proper secrets manager and follow secure key-rotation practices.
+
 - Hybrid Crypto (Recommendation):
   - RSA is not suitable for large payloads. Prefer hybrid encryption: encrypt the message with AES-GCM, then wrap the AES key with RSA (OAEP preferred), enabling longer messages and modern security.
 
